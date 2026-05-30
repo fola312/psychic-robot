@@ -10,10 +10,11 @@ The physical boundaries of the court are mapped using native HTML5 SVG path elem
     <path data-zone="Paint Mid" onclick="selectZone('Paint Mid')" class="court-sensor" d="M170,60 H330 V130 H170 Z" />
     <path data-zone="Paint High" onclick="selectZone('Paint High')" class="court-sensor" d="M170,130 H330 V190 H170 Z" />
 </g>
-```
+
     2. State Management Layer (The Capture Script)
 When a zone path is tapped, this function processes the input token, handles haptic feedback, manages the selection toggle logic, and triggers the UI rendering updates:
 
+```
 function selectZone(zoneId) {
     triggerHaptic(10);
     selectedZone = (selectedZone === zoneId) ? 'Overall' : zoneId;
