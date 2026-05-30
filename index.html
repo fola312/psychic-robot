@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" name="viewport" />
+    <title>Jumpshot Buddy: Pro Master V31</title>
+
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Lexend:wght@100..900&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"
+        rel="stylesheet" />
+
+    <script id="tailwind-config">
+        tailwind.config = {
+            error: "#FF3131",
+            success: "#00FF94",
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#FF6B00",
+                        "background-dark": "#0A0A0A",
+                        "surface": "#1A1A1A",
+                        "surface-light": "#262626"
+                    },
+                    fontFamily: { "display": ["Lexend", "sans-serif"] },
+                },
+            },
+        }
+
+        /**
+         * 1. ARCHITECTURE & GLOBAL STATE
+         * Baselined for full descriptive density (~1000 lines).
+         */
+        let shotHistory = JSON.parse(localStorage.getItem('jumpshot_current_history')) || [];
+        let sessionGoal = parseInt(localStorage.getItem('jumpshot_session_goal')) || 10;
+        let workoutArchive = JSON.parse(localStorage.getItem('jumpshot_archive')) || [];
+
+        // Active State Tracking
+        let viewHistory = [...shotHistory];
+        let isReviewMode = false;
+        let startTime = null;
+        let timerInterval = null;
+
+        // Modifier State Management
+        let soloInputMakes = 0;
+        let selectedZone = 'Overall';
+        let selectedType = 'Jump Shot';
+        let selectedMovement = 'None';
+        let selectedContest = 'Open';
+        let selectedHand = 'R';
+        let selectedElbowSide = 'Center';
+
+        /**
+         * 2. ANALYTICS & CALCULATION ENGINE
+         * Logic hardened for Elbow/High Post bridging and global volume recaps.
+         */
+        function calculateStats(history, isGlobalRecap = false) {
+            /** * STRATEGY: Bridge the gap between SVG ID and Logged Strings.
+             * Maps "Paint High" sensor to side-specific strings like "Left High Post".
+             */
+            let searchKey = selectedZone;
+            if (selectedZone === 'Paint High') {
+                searchKey = 'High Post';
+            }
+
+            const relevant = history.filter(s => {
+                // Ignore filters if displaying global summary
+                if (isGlobalRecap === true) {
+                    return true;
+                }
+
+                // Normal HUD logic: match current zone and shot type
+                const zoneMatch = (selectedZone === 'Overall' || s.zone.includes(searchKey));
+                const typeMatch = (s.type === selectedType);
+
+                return zoneMatch && typeMatch;
+            });
+
+            const total = relevant.length;
+            const makes = relevant.filter(s => s.isMake === true).length;
+            const threeMakes = relevant.filter(s => s.isMake === true && s.pts === 3).length;
+            const points = relevant.reduce((sum, s) => sum + (s.isMake ? s.pts : 0), 0);
+
+            // eFG% Formula: (Makes + 0.5 * 3PM) / Attempts
+            const fg = total === 0 ? 0 : Math.round((makes / total) * 100);
+            const efg = total === 0 ? 0 : Math.round(((makes + (0.5 * threeMakes)) / total) * 100);
+
+            return {
+                makes: makes,
+                total: total,
+                fg: fg,
+                efg: efg,
+                points: points
+            };
+        }
+
+        function getHotZone(history) {
+            if (history.length === 0) return { name: 'N/A', pct: 0 };
+
+            const uniqueZones = [...new Set(history.map(s => s.zone))];
+            let best = { name: 'N/A', pct: -1 };
+
+            uniqueZones.forEach(z => {
+                const zShots = history.filter(s => s.zone === z);
+                const makes = zShots.filter(s => s.isMake === true).length;
+                const pct = (makes / zShots.length) * 100;
+
+                if (pct > best.pct) {
+                    best = { name: z, pct: Math.round(pct) };
+                }
+            });
+            return best;
+        }
+
+        /**
+         * 3. UI RENDERING ENGINE
+         * Manages Two-Tier Narrative Pill and Stealth Interaction logic.
+         */
+        function updateDisplay() {
+            const stats = calculateStats(viewHistory);
+
+            // Global Counter Update
+            document.getElementById('solo-makes').innerText = soloInputMakes;
+            document.querySelectorAll('.goal-sync').forEach(el => el.innerText = sessionGoal);
+
+            // Telemetry Header Cluster
+            document.getElementById('header-efg').innerText = `${stats.efg}%`;
+            document.getElementById('header-fg').innerText = `${stats.fg}%`;
+            document.getElementById('header-ma').innerText = `${stats.makes}/${stats.total}`;
+
+            /**
+             * TWO-TIER COMMAND PILL LOGIC:
+             * Splits core data (Location/Type) from modifiers (Move/Def/Hand)
+             * to prevent horizontal overflow and semantic redundancy.
+             */
+
+            // TIER 1: Primary Identification
+            let tier1Parts = [];
+            if (selectedZone === 'Overall') {
+                tier1Parts.push('FULL COURT');
+            } else {
+                tier1Parts.push(selectedZone.toUpperCase());
+            }
+
+            // Deduplicate: If Off-Hand is selected, skip the type label for Tier 1
+            if (selectedType !== 'Off-Hand') {
+                tier1Parts.push(selectedType.toUpperCase());
+            }
+            document.getElementById('pill-tier-1').innerText = tier1Parts.join(' • ');
+
+            // TIER 2: Active Modifiers (Exceptions only)
+            let tier2Parts = [];
+            if (selectedMovement !== 'None') {
+                tier2Parts.push(selectedMovement.toUpperCase());
+            }
+            if (selectedContest === 'Cont') {
+                tier2Parts.push('CONTESTED');
+            }
+            // Explicit Hand labeling for Off-Hand work
+            if (selectedType === 'Off-Hand') {
+                const label = selectedHand === 'L' ? 'LEFT HAND' : 'RIGHT HAND';
+                tier2Parts.push(label);
+            }
+
+            const tier2El = document.getElementById('pill-tier-2');
+            if (tier2Parts.length > 0) {
+                tier2El.innerText = tier2Parts.join(' • ');
+                tier2El.classList.remove('hidden');
+            } else {
+                tier2El.classList.add('hidden');
+            }
+
+            // UI HUD Mode Switching
+            const inputHud = document.getElementById('input-hud');
+            const reviewHud = document.getElementById('review-hud');
+            const statusPill = document.getElementById('status-pill');
+
+            if (isReviewMode === true) {
+                inputHud.classList.add('hidden');
+                reviewHud.classList.remove('hidden');
+                statusPill.innerText = 'REVIEW';
+                statusPill.className = 'px-3 py-1 rounded-full bg-white/10 text-white/50 text-[7px] font-black uppercase tracking-widest border border-white/10';
+            } else {
+                inputHud.classList.remove('hidden');
+                reviewHud.classList.add('hidden');
+                statusPill.innerText = 'LIVE';
+                statusPill.className = 'px-3 py-1 rounded-full bg-primary/20 text-primary text-[7px] font-black uppercase tracking-widest border border-primary/30 animate-pulse';
+            }
+
+            // PROGRESSIVE DISCLOSURE: Hide Hand row unless Off-Hand is active
+            const handRow = document.getElementById('hand-context-row');
+            if (selectedType === 'Off-Hand') {
+                handRow.style.display = 'flex';
+            } else {
+                handRow.style.display = 'none';
+            }
+
+            // Reveal Elbow Context for Paint High selection
+            const elbowRow = document.getElementById('elbow-context-row');
+            if (selectedZone === 'Paint High') {
+                elbowRow.style.display = 'flex';
+            } else {
+                elbowRow.style.display = 'none';
+            }
+
+            // SVG Map Heatmapping (Stealth Hit-Boxes)
+            document.querySelectorAll('.court-sensor').forEach(path => {
+                const zoneId = path.getAttribute('data-zone');
+                const heatColor = getHeatmapColor(zoneId);
+
+                if (selectedZone === zoneId) {
+                    path.style.fill = heatColor;
+                    path.style.stroke = '#FF6B00';
+                    path.style.strokeWidth = '3';
+                    path.style.fillOpacity = '0.85';
+                } else {
+                    path.style.fill = heatColor;
+                    path.style.stroke = 'transparent';
+                    // 0.01 opacity allows touch hits while keeping floor visually clean
+                    if (heatColor.includes('255, 255, 255, 0.05')) {
+                        path.style.fillOpacity = '0.01';
+                    } else {
+                        path.style.fillOpacity = '0.2';
+                    }
+                }
+            });
+        }
+
+        function getHeatmapColor(zoneId) {
+            const shots = viewHistory.filter(s => s.zone.includes(zoneId) && s.type === selectedType);
+            if (shots.length === 0) return 'rgba(255, 255, 255, 0.05)';
+            const pct = (shots.filter(s => s.isMake === true).length / shots.length) * 100;
+
+            if (pct < 35) {
+                return 'rgba(255, 49, 49, 0.4)'; // Cold
+            } else if (pct < 50) {
+                return 'rgba(255, 107, 0, 0.4)'; // Mid
+            } else {
+                return 'rgba(0, 255, 148, 0.4)'; // Hot
+            }
+        }
+
+        /**
+         * 4. TIMER & SESSION TRACKING
+         * Choice: Continuous session time for training intensity analytics.
+         */
+        function startTimer() {
+            if (startTime !== null || isReviewMode === true) {
+                return;
+            }
+            startTime = Date.now();
+            timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const m = Math.floor(elapsed / 60);
+                const s = elapsed % 60;
+                document.getElementById('header-live-clock').innerText = `${m}:${s.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+
+        /**
+         * 5. HANDLERS
+         */
+        function selectZone(zoneId) {
+            triggerHaptic(10);
+            selectedZone = (selectedZone === zoneId) ? 'Overall' : zoneId;
+            selectedElbowSide = 'Center';
+            soloInputMakes = 0;
+            updateDisplay();
+        }
+
+        function logBatch() {
+            if (selectedZone === 'Overall' && selectedType !== 'Free Throw') {
+                return alert("Select a court zone before logging shots.");
+            }
+            triggerHaptic(60);
+            startTimer();
+            isReviewMode = false;
+
+            // ELBOW STRING RESOLVER
+            let logName = selectedZone;
+            if (selectedZone === 'Paint High') {
+                if (selectedElbowSide === 'Center') {
+                    logName = 'High Post (Center)';
+                } else {
+                    logName = `${selectedElbowSide} High Post`;
+                }
+            }
+
+            const timestampString = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const ptsValue = (selectedZone.includes('3')) ? 3 : 2;
+            const handLabel = (selectedHand === 'L') ? 'Left' : 'Right';
+
+            // Descriptive Entry Loop
+            for (let i = 0; i < (sessionGoal - soloInputMakes); i++) {
+                shotHistory.unshift({
+                    zone: logName,
+                    type: selectedType,
+                    isMake: false,
+                    pts: ptsValue,
+                    detail: `${selectedContest} • ${handLabel}`,
+                    timestamp: timestampString
+                });
+            }
+            for (let i = 0; i < soloInputMakes; i++) {
+                shotHistory.unshift({
+                    zone: logName,
+                    type: selectedType,
+                    isMake: true,
+                    pts: ptsValue,
+                    detail: `${selectedContest} • ${handLabel}`,
+                    timestamp: timestampString
+                });
+            }
+
+            viewHistory = [...shotHistory];
+            syncStorage();
+            soloInputMakes = 0;
+            updateDisplay();
+            renderHistory();
+        }
+
+        function selectModifier(category, val, btn) {
+            triggerHaptic(10);
+            if (category === 'move') selectedMovement = val;
+            if (category === 'def') selectedContest = val;
+            if (category === 'hand') selectedHand = val;
+            if (category === 'elbow') selectedElbowSide = val;
+
+            const siblings = btn.parentElement.querySelectorAll('button');
+            siblings.forEach(b => {
+                b.classList.replace('bg-primary', 'bg-surface-light');
+                b.classList.add('text-white/40');
+            });
+            btn.classList.add('bg-primary');
+            btn.classList.remove('text-white/40');
+            updateDisplay();
+        }
+
+        function selectType(type, btn) {
+            triggerHaptic(10);
+            selectedType = type;
+
+            // Guardrail: Revert hand selection if moving away from Off-Hand work
+            if (type !== 'Off-Hand') {
+                selectedHand = 'R';
+            }
+
+            const typeButtons = document.querySelectorAll('.type-btn');
+            typeButtons.forEach(b => b.classList.replace('bg-primary', 'bg-surface-light'));
+            btn.classList.replace('bg-surface-light', 'bg-primary');
+            updateDisplay();
+        }
+
+        function adjustSoloMakes(val) {
+            triggerHaptic(10);
+            const nextCount = soloInputMakes + val;
+            if (nextCount >= 0 && nextCount <= sessionGoal) {
+                soloInputMakes = nextCount;
+                updateDisplay();
+            }
+        }
+
+        /**
+         * 6. RECAP & ARCHIVE ACCESS
+         */
+        function endSession() {
+            if (shotHistory.length === 0) {
+                return alert("Log shots before completing workout.");
+            }
+            clearInterval(timerInterval);
+            showSummary(shotHistory);
+        }
+
+        function showSummary(dataArray) {
+            // IGNORE FILTERS: recap shows absolute total volume
+            const stats = calculateStats(dataArray, true);
+            const hot = getHotZone(dataArray);
+
+            let displayDuration = "N/A";
+            let displayPace = "0";
+
+            if (isReviewMode === false && startTime !== null) {
+                const durationSec = Math.floor((Date.now() - startTime) / 1000);
+                displayDuration = Math.floor(durationSec / 60) + "m";
+                displayPace = (stats.total / (durationSec / 60)).toFixed(1);
+            } else if (isReviewMode === true) {
+                displayDuration = document.getElementById('header-live-clock').innerText;
+                const mins = parseInt(displayDuration.split(':')[0]) || 1;
+                displayPace = (stats.total / mins).toFixed(1);
+            }
+
+            document.getElementById('sum-total').innerText = stats.total;
+            document.getElementById('sum-efg').innerText = stats.efg + '%';
+            document.getElementById('sum-duration').innerText = displayDuration;
+            document.getElementById('sum-pace').innerText = displayPace;
+            document.getElementById('sum-pts').innerText = stats.points;
+            document.getElementById('sum-hot-zone').innerText = hot.name.toUpperCase();
+            document.getElementById('sum-hot-pct').innerText = hot.pct + '%';
+
+            document.getElementById('summary-modal').classList.remove('hidden');
+            const content = document.getElementById('summary-content');
+            setTimeout(() => content.classList.remove('translate-y-full'), 10);
+        }
+
+        function closeSummary() {
+            if (isReviewMode === true) {
+                document.getElementById('summary-modal').classList.add('hidden');
+                return;
+            }
+
+            const stats = calculateStats(shotHistory, true);
+            workoutArchive.unshift({
+                date: new Date().toLocaleDateString(),
+                total: stats.total,
+                efg: stats.efg,
+                duration: document.getElementById('header-live-clock').innerText,
+                fullLog: [...shotHistory],
+                id: Date.now()
+            });
+
+            shotHistory = []; viewHistory = []; isReviewMode = false; startTime = null;
+            document.getElementById('header-live-clock').innerText = "0:00";
+            syncStorage(); updateDisplay(); renderHistory();
+            document.getElementById('summary-modal').classList.add('hidden');
+        }
+
+        /**
+         * 7. ARCHIVE NAVIGATION
+         */
+        function toggleArchive(open) {
+            const drawer = document.getElementById('archive-drawer');
+            const content = document.getElementById('archive-content');
+            if (open) {
+                renderArchive();
+                drawer.classList.remove('hidden');
+                setTimeout(() => content.classList.remove('translate-x-full'), 10);
+            } else {
+                content.classList.add('translate-x-full');
+                setTimeout(() => drawer.classList.add('hidden'), 500);
+            }
+        }
+
+        function renderArchive() {
+            const list = document.getElementById('archive-list');
+            if (workoutArchive.length === 0) {
+                list.innerHTML = `<div class="py-20 text-center text-white/10 uppercase font-black tracking-widest">History Empty</div>`;
+                return;
+            }
+            list.innerHTML = workoutArchive.map(session => `
+                <div onclick="diveIntoSession(${session.id})" class="bg-white/5 p-5 rounded-2xl border border-white/5 mb-3 flex justify-between items-center active:bg-primary/20 transition-all cursor-pointer shadow-lg">
+                    <div>
+                        <span class="block text-[8px] font-black text-white/20 uppercase mb-1">${session.date} • ${session.duration}</span>
+                        <span class="text-xl font-black text-white tabular-nums">${session.total} <span class="text-[10px] font-bold text-white/40 uppercase tracking-widest">Shots</span></span>
+                    </div>
+                    <div class="text-right">
+                        <span class="block text-[8px] font-black text-primary uppercase mb-1">eFG% Performance</span>
+                        <span class="text-xl font-black text-primary tabular-nums">${session.efg}%</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function diveIntoSession(id) {
+            const session = workoutArchive.find(s => s.id === id);
+            if (!session) return;
+            isReviewMode = true;
+            viewHistory = session.fullLog;
+            document.getElementById('header-live-clock').innerText = session.duration || "N/A";
+            updateDisplay();
+            toggleArchive(false);
+
+            // LAUNCH DASHBOARD: automatic recap firing for past dataset reviews
+            showSummary(session.fullLog);
+        }
+
+        function exitReview() {
+            isReviewMode = false;
+            viewHistory = [...shotHistory];
+            document.getElementById('header-live-clock').innerText = "0:00";
+            updateDisplay();
+        }
+
+        function exportCSV() {
+            if (workoutArchive.length === 0) return alert("Archive empty.");
+            let csv = "Date,Zone,Type,Detail,Made,Points\n";
+            workoutArchive.forEach(session => {
+                session.fullLog.forEach(s => {
+                    csv += `${session.date},${s.zone},${s.type},${s.detail},${s.isMake},${s.pts}\n`;
+                });
+            });
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.setAttribute('href', url); a.setAttribute('download', `jumpshot_buddy_log_${Date.now()}.csv`); a.click();
+        }
+
+        function renderHistory() {
+            const list = document.getElementById('history-list');
+            list.innerHTML = shotHistory.length ? shotHistory.slice(0, 3).map(s => `
+                <div class="flex items-center justify-between py-1 border-b border-white/5 text-[8px] uppercase font-bold text-white/30 last:border-0">
+                    <span>${s.isMake ? '✓' : '✕'} ${s.zone}</span>
+                    <span class="font-mono text-[7px] font-normal tracking-widest opacity-50">${s.timestamp}</span>
+                </div>
+            `).join('') : '<div class="text-[7px] text-white/10 text-center py-2 uppercase tracking-widest text-left">Awaiting Log Batch</div>';
+        }
+
+        function changeTotalGoal() {
+            const userInput = prompt("Set target shots per set:", sessionGoal);
+            if (userInput && !isNaN(userInput)) { sessionGoal = parseInt(userInput); syncStorage(); updateDisplay(); }
+        }
+
+        function clearArchive() {
+            if (confirm("Permanently wipe workout history?")) {
+                workoutArchive = []; syncStorage(); renderArchive();
+            }
+        }
+
+        function triggerHaptic(pattern = 20) { if ("vibrate" in navigator) navigator.vibrate(pattern); }
+        function syncStorage() { localStorage.setItem('jumpshot_current_history', JSON.stringify(shotHistory)); localStorage.setItem('jumpshot_session_goal', sessionGoal.toString()); localStorage.setItem('jumpshot_archive', JSON.stringify(workoutArchive)); }
+
+        document.addEventListener('DOMContentLoaded', () => { updateDisplay(); renderHistory(); });
+    </script>
+
+    <style type="text/tailwindcss">
+        @layer base { 
+            body { 
+                @apply bg-background-dark text-white font-display overflow-hidden h-[100dvh]; 
+                -webkit-tap-highlight-color: transparent; 
+            } 
+        }
+        .court-sensor { @apply transition-all duration-300 cursor-pointer; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+
+<body class="flex flex-col h-[100dvh]">
+    <header class="shrink-0 bg-surface border-b border-white/5 px-4 py-3 shadow-xl">
+        <div class="flex justify-between items-center max-w-[500px] mx-auto">
+            <button onclick="toggleArchive(true)"
+                class="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center active:scale-90 transition-all shadow-md">
+                <span class="material-symbols-outlined text-white/40 text-xl font-normal">history</span>
+            </button>
+
+            <div class="flex flex-col items-center">
+                <div class="flex items-center gap-2">
+                    <span id="status-pill"
+                        class="px-3 py-1 rounded-full bg-primary/20 text-primary text-[7px] font-black uppercase tracking-widest border border-primary/30">LIVE</span>
+                    <span id="header-live-clock"
+                        class="text-[10px] font-black text-white tracking-[0.2em] tabular-nums">0:00</span>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-3">
+                <div class="flex flex-col items-end">
+                    <span class="text-[6px] font-black text-white/20 uppercase tracking-widest">Efficiency</span>
+                    <span id="header-efg"
+                        class="text-xl font-black text-primary tabular-nums tracking-tighter">0%</span>
+                </div>
+                <div class="flex flex-col items-end border-l border-white/10 pl-3">
+                    <span id="header-ma"
+                        class="text-[10px] font-black text-white/40 tabular-nums leading-tight">0/0</span>
+                    <span id="header-fg"
+                        class="text-[10px] font-black text-white/40 tabular-nums leading-tight">0%</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex flex-col flex-1 overflow-hidden">
+        <div class="flex-1 w-full max-w-[500px] mx-auto px-4 py-4 flex flex-col items-center justify-center">
+
+            <div
+                class="mb-3 flex flex-col items-center bg-white/5 px-6 py-2 rounded-2xl border border-white/5 shadow-inner min-h-[50px] justify-center">
+                <span id="pill-tier-1" class="text-[10px] font-black uppercase text-primary tracking-[0.3em]">FULL COURT
+                    • JUMP SHOT</span>
+                <span id="pill-tier-2"
+                    class="text-[7px] font-bold uppercase text-white/30 tracking-[0.2em] mt-0.5 hidden"></span>
+            </div>
+
+            <div
+                class="relative w-full aspect-[500/400] bg-surface rounded-3xl border border-white/10 shadow-2xl overflow-hidden">
+                <svg viewBox="0 0 500 400" class="w-full h-full">
+                    <g fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2" pointer-events="none">
+                        <path d="M0,0 h500" />
+                        <rect x="170" y="0" width="160" height="190" />
+                        <path d="M30,0 V140 A220,220 0 0,0 470,140 V0" />
+                        <circle cx="250" cy="25" r="7" />
+                        <path d="M170,190 H330" />
+                    </g>
+                    <g id="heatmap-zones">
+                        <path data-zone="Paint Low" onclick="selectZone('Paint Low')" class="court-sensor"
+                            d="M170,0 H330 V60 H170 Z" />
+                        <path data-zone="Paint Mid" onclick="selectZone('Paint Mid')" class="court-sensor"
+                            d="M170,60 H330 V130 H170 Z" />
+                        <path data-zone="Paint High" onclick="selectZone('Paint High')" class="court-sensor"
+                            d="M170,130 H330 V190 H170 Z" />
+                        <path data-zone="Mid L Base" onclick="selectZone('Mid L Base')" class="court-sensor"
+                            d="M30,0 H170 V140 H30 Z" />
+                        <path data-zone="Mid R Base" onclick="selectZone('Mid R Base')" class="court-sensor"
+                            d="M330,0 H470 V140 H330 Z" />
+                        <path data-zone="Mid L Wing" onclick="selectZone('Mid L Wing')" class="court-sensor"
+                            d="M30,140 H170 V220 L125,320 A225,225 0 0,1 30,140 Z" />
+                        <path data-zone="Mid R Wing" onclick="selectZone('Mid R Wing')" class="court-sensor"
+                            d="M470,140 A225,225 0 0,1 375,320 L330,220 V140 H470 Z" />
+                        <path data-zone="Top of Key" onclick="selectZone('Top of Key')" class="court-sensor"
+                            d="M170,190 H330 L375,320 A225,225 0 0,1 125,320 Z" />
+                        <path data-zone="Corner L 3" onclick="selectZone('Corner L 3')" class="court-sensor"
+                            d="M0,0 H30 V140 H0 Z" />
+                        <path data-zone="Corner R 3" onclick="selectZone('Corner R 3')" class="court-sensor"
+                            d="M470,0 H500 V140 H470 Z" />
+                        <path data-zone="Wing L 3" onclick="selectZone('Wing L 3')" class="court-sensor"
+                            d="M0,140 H30 A220,220 0 0,0 125,320 L0,400 Z" />
+                        <path data-zone="Wing R 3" onclick="selectZone('Wing R 3')" class="court-sensor"
+                            d="M500,140 H470 A220,220 0 0,1 375,320 L500,400 Z" />
+                        <path data-zone="Top 3" onclick="selectZone('Top 3')" class="court-sensor"
+                            d="M125,320 A220,220 0 0,0 375,320 L500,400 H0 Z" />
+                    </g>
+                </svg>
+            </div>
+        </div>
+
+        <div class="shrink-0 px-4 pb-4 flex flex-col gap-2">
+            <div id="elbow-context-row"
+                class="hidden flex items-center gap-1 bg-primary/10 p-1 rounded-xl border border-primary/20 mb-1 shadow-inner">
+                <span class="text-[7px] font-black text-primary px-2 uppercase shrink-0 tracking-widest">Elbow
+                    Position</span>
+                <button onclick="selectModifier('elbow', 'Left', this)"
+                    class="flex-1 py-1.5 rounded-lg bg-surface-light text-white/40 text-[8px] font-bold uppercase transition-all shadow-md">Left</button>
+                <button onclick="selectModifier('elbow', 'Center', this)"
+                    class="flex-1 py-1.5 rounded-lg bg-primary text-white text-[8px] font-bold uppercase transition-all shadow-md">Center</button>
+                <button onclick="selectModifier('elbow', 'Right', this)"
+                    class="flex-1 py-1.5 rounded-lg bg-surface-light text-white/40 text-[8px] font-bold uppercase transition-all shadow-md">Right</button>
+            </div>
+
+            <div class="flex overflow-x-auto gap-2 no-scrollbar pb-1">
+                <button onclick="selectType('Jump Shot', this)"
+                    class="type-btn flex-1 h-8 rounded-lg bg-primary text-background-dark text-[9px] font-black uppercase whitespace-nowrap shadow-md">Jump
+                    Shot</button>
+                <button onclick="selectType('Layup', this)"
+                    class="type-btn flex-1 h-8 rounded-lg bg-surface-light text-white/40 text-[9px] font-black uppercase whitespace-nowrap shadow-md">Layup</button>
+                <button onclick="selectType('Free Throw', this)"
+                    class="type-btn flex-1 h-8 rounded-lg bg-surface-light text-white/40 text-[9px] font-black uppercase whitespace-nowrap shadow-md">Free
+                    Throw</button>
+                <button onclick="selectType('Floater', this)"
+                    class="type-btn flex-1 h-8 rounded-lg bg-surface-light text-white/40 text-[9px] font-black uppercase whitespace-nowrap shadow-md">Floater</button>
+                <button onclick="selectType('Off-Hand', this)"
+                    class="type-btn flex-1 h-8 rounded-lg bg-surface-light text-white/40 text-[9px] font-black uppercase whitespace-nowrap shadow-md">Off-Hand</button>
+            </div>
+
+            <div class="flex items-center gap-1 bg-surface/50 p-1.5 rounded-xl border border-white/5 shadow-sm">
+                <span class="text-[7px] font-black text-white/20 px-2 uppercase tracking-[0.2em]">Move</span>
+                <button onclick="selectModifier('move', 'None', this)"
+                    class="flex-1 py-1.5 rounded-lg bg-primary text-white text-[8px] font-black uppercase tracking-tighter transition-all">None</button>
+                <button onclick="selectModifier('move', 'Fade', this)"
+                    class="flex-1 py-1.5 rounded-lg text-white/40 text-[8px] font-black uppercase tracking-tighter transition-all">Fade</button>
+                <button onclick="selectModifier('move', 'Left', this)"
+                    class="flex-1 py-1.5 rounded-lg text-white/40 text-[8px] font-black uppercase tracking-tighter transition-all">Left</button>
+                <button onclick="selectModifier('move', 'Right', this)"
+                    class="flex-1 py-1.5 rounded-lg text-white/40 text-[8px] font-black uppercase tracking-tighter transition-all">Right</button>
+            </div>
+
+            <div class="flex items-center gap-1 bg-surface/50 p-1.5 rounded-xl border border-white/5 shadow-sm">
+                <span class="text-[7px] font-black text-white/20 pl-2 uppercase shrink-0 tracking-widest">Def</span>
+                <button onclick="selectModifier('def', 'Open', this)"
+                    class="flex-1 py-1.5 rounded-lg bg-primary text-white text-[9px] font-black uppercase tracking-widest">Open</button>
+                <button onclick="selectModifier('def', 'Cont', this)"
+                    class="flex-1 py-1.5 rounded-lg text-white/40 text-[9px] font-black uppercase tracking-tighter">Cont</button>
+            </div>
+
+            <div id="hand-context-row"
+                class="hidden flex items-center gap-1 bg-surface/50 p-1.5 rounded-xl border border-white/5 shadow-sm">
+                <span class="text-[7px] font-black text-white/20 pl-2 uppercase shrink-0 tracking-widest">Hand</span>
+                <button onclick="selectModifier('hand', 'L', this)"
+                    class="flex-1 py-1.5 rounded-lg text-white/40 text-[9px] font-black uppercase">Left</button>
+                <button onclick="selectModifier('hand', 'R', this)"
+                    class="flex-1 py-1.5 rounded-lg bg-primary text-white text-[9px] font-black uppercase shadow-inner">Right</button>
+            </div>
+        </div>
+
+        <div class="shrink-0 bg-surface border-t border-white/5 rounded-t-[2.5rem] px-6 pt-6 pb-8 shadow-2xl relative">
+            <div id="input-hud" class="flex flex-col">
+                <div class="flex items-center justify-between mb-4 text-center">
+                    <button onclick="adjustSoloMakes(-1)"
+                        class="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center active:scale-90 shadow-lg transition-transform"><span
+                            class="material-symbols-outlined text-white/40 text-xl font-normal">remove</span></button>
+                    <div class="flex items-baseline gap-2 mx-auto">
+                        <span id="solo-makes"
+                            class="text-6xl font-black text-primary tabular-nums tracking-tighter">0</span>
+                        <span class="text-2xl font-bold text-white/10">/</span>
+                        <button onclick="changeTotalGoal()"
+                            class="goal-sync text-2xl font-bold text-white/40 border-b border-dashed border-white/10">10</button>
+                    </div>
+                    <button onclick="adjustSoloMakes(1)"
+                        class="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center active:scale-90 shadow-lg transition-transform"><span
+                            class="material-symbols-outlined text-white/40 text-xl font-normal">add</span></button>
+                </div>
+                <div class="flex gap-3">
+                    <button onclick="logBatch()"
+                        class="flex-[4] h-16 bg-white text-background-dark rounded-2xl font-black uppercase text-sm tracking-widest active:scale-95 transition-all shadow-xl">LOG
+                        BATCH SET</button>
+                    <button onclick="endSession()"
+                        class="flex-1 h-16 bg-surface-light border border-white/5 text-white/30 rounded-2xl flex items-center justify-center active:scale-95 transition-all shadow-xl"><span
+                            class="material-symbols-outlined font-normal">archive</span></button>
+                </div>
+            </div>
+
+            <div id="review-hud" class="hidden flex flex-col">
+                <button onclick="exitReview()"
+                    class="w-full h-16 bg-primary text-white rounded-2xl font-black uppercase text-sm tracking-widest active:scale-95 shadow-xl tracking-widest">RESUME
+                    LIVE SESSION</button>
+            </div>
+
+            <div id="history-list"
+                class="mt-4 px-2 py-1 bg-black/10 rounded-lg min-h-[30px] text-left uppercase tracking-tighter shadow-inner">
+            </div>
+        </div>
+    </main>
+
+    <div id="archive-drawer"
+        class="fixed inset-0 z-[200] hidden bg-background-dark/95 backdrop-blur-sm flex justify-end">
+        <div class="w-full max-w-[400px] h-full bg-surface border-l border-white/10 shadow-2xl transform transition-transform duration-500 translate-x-full flex flex-col shadow-2xl"
+            id="archive-content">
+            <header class="p-6 border-b border-white/5 flex justify-between items-center">
+                <h3 class="text-2xl font-black uppercase tracking-tighter text-white">Shooting History</h3><button
+                    onclick="toggleArchive(false)"
+                    class="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center active:scale-90"><span
+                        class="material-symbols-outlined text-white/40 font-normal">close</span></button>
+            </header>
+            <div id="archive-list" class="flex-1 overflow-y-auto p-6 no-scrollbar"></div>
+            <footer class="p-6 border-t border-white/5 space-y-3">
+                <button onclick="exportCSV()"
+                    class="w-full h-14 bg-white text-background-dark rounded-2xl font-black uppercase text-[10px] tracking-widest active:scale-95 shadow-lg">EXPORT
+                    CSV DATABASE</button>
+                <button onclick="clearArchive()"
+                    class="w-full h-12 bg-error/10 text-error rounded-xl font-bold uppercase text-[10px] tracking-widest border border-error/20 active:scale-95">WIPE
+                    RECORDS</button>
+            </footer>
+        </div>
+    </div>
+
+    <div id="summary-modal" class="fixed inset-0 z-[100] hidden bg-background-dark/95 backdrop-blur-sm flex items-end">
+        <div class="w-full max-w-[500px] mx-auto bg-surface rounded-t-[3rem] p-8 border-t border-white/10 shadow-2xl transform transition-transform duration-500 translate-y-full"
+            id="summary-content">
+            <div class="w-12 h-1.5 bg-white/10 rounded-full mx-auto mb-8"></div>
+            <h2 class="text-3xl font-black text-white mb-8 uppercase tracking-tighter text-center">SESSION RECAP</h2>
+
+            <div class="grid grid-cols-2 gap-4 mb-4 text-center">
+                <div class="bg-white/5 p-4 rounded-2xl border border-white/5 shadow-lg"><span
+                        class="block text-[8px] font-black text-white/20 uppercase mb-1 tracking-widest">Global
+                        Workload</span><span id="sum-total"
+                        class="text-2xl font-black tabular-nums tracking-tighter text-white">0</span></div>
+                <div class="bg-white/5 p-4 rounded-2xl border border-white/5 shadow-lg"><span
+                        class="block text-[8px] font-black text-primary uppercase mb-1 tracking-widest">eFG%
+                        Performance</span><span id="sum-efg"
+                        class="text-2xl font-black text-primary tabular-nums tracking-tighter">0%</span></div>
+                <div class="bg-white/5 p-4 rounded-2xl border border-white/5 shadow-lg"><span
+                        class="block text-[8px] font-black text-white/20 uppercase mb-1 tracking-widest">Time
+                        Spent</span><span id="sum-duration"
+                        class="text-xl font-black text-white tabular-nums tracking-tighter">0m</span></div>
+                <div class="bg-white/5 p-4 rounded-2xl border border-white/5 shadow-lg"><span
+                        class="block text-[8px] font-black text-success uppercase mb-1 tracking-widest">Intensity
+                        Pace</span><span class="text-xl font-black text-success tabular-nums tracking-tighter"><span
+                            id="sum-pace">0</span><span class="text-[8px] ml-1 font-black">S/M</span></span></div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4 mb-8">
+                <div
+                    class="bg-white/5 p-4 rounded-2xl border border-white/5 flex items-center justify-between shadow-lg">
+                    <span class="text-[8px] font-black text-white/20 uppercase tracking-widest">Points
+                        Scored</span><span id="sum-pts" class="text-lg font-black text-success tabular-nums">0</span>
+                </div>
+                <div
+                    class="bg-white/10 p-4 rounded-2xl border border-primary/20 flex flex-col justify-center shadow-inner">
+                    <span class="text-[6px] font-black text-primary uppercase tracking-[0.2em] mb-1">Highest Efficiency
+                        Sensor</span>
+                    <div class="flex justify-between items-baseline gap-2"><span id="sum-hot-zone"
+                            class="text-[9px] font-black text-white uppercase truncate tracking-tighter">N/A</span><span
+                            id="sum-hot-pct" class="text-sm font-black text-white tabular-nums">0%</span></div>
+                </div>
+            </div>
+
+            <button onclick="closeSummary()"
+                class="w-full h-16 bg-white text-background-dark rounded-2xl font-black uppercase text-sm tracking-widest active:scale-95 transition-all shadow-xl">COMMIT
+                & ARCHIVE</button>
+        </div>
+    </div>
+</body>
+
+</html>
